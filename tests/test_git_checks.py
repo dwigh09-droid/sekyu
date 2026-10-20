@@ -274,14 +274,33 @@ class DependencyTests(unittest.TestCase):
         self.assertIn("requirements.txt", cmd)
         self.assertIn("requirements-dev.txt", cmd)
 
-    def test_pip_audit_pyproject_no_r(self):
+    def test_pip_audit_never_resolves(self):
+        # Resolution makes pip build packages, which runs code from the audited repo.
+        (self.dir / "requirements.txt").write_text("requests[security]==2.19.0 ; python_version >= '3'  # pinned\n")
+        self.deps({"pip-audit": PIP_JSON})
+        cmd = self.calls[0][0]
+        self.assertIn("--disable-pip", cmd)
+        self.assertIn("--no-deps", cmd)
+
+    def test_unsafe_requirements_skipped(self):
+        for line in ("./pkg", "-e .", "--index-url https://evil/simple", "git+https://x/y.git",
+                     "requests>=2", "pkg @ https://x/p.whl", "-r other.txt", "pkg==1.0 --hash=sha256:ab"):
+            with self.subTest(line=line):
+                self.calls.clear()
+                (self.dir / "requirements.txt").write_text("flask==2.0.0\n" + line + "\n")
+                found = self.deps({"pip-audit": PIP_JSON})
+                self.assertEqual(self.calls, [])
+                self.assertIn("requirements.txt skipped", self.text(found, "INFO"))
+
+    def test_pyproject_not_run(self):
         (self.dir / "pyproject.toml").write_text("[project]\n")
-        self.deps({"pip-audit": {"dependencies": []}})
-        self.assertNotIn("-r", self.calls[0][0])
+        found = self.deps({"pip-audit": {"dependencies": []}})
+        self.assertEqual(self.calls, [])
+        self.assertIn("pyproject.toml", self.text(found, "INFO"))
 
     def test_missing_tool_is_note(self):
         (self.dir / "yarn.lock").write_text("")
-        (self.dir / "poetry.lock").write_text("")
+        (self.dir / "requirements.txt").write_text("requests==2.19.0\n")
         found = self.deps({}, found=())
         self.assertEqual(self.calls, [])
         info = self.text(found, "INFO")

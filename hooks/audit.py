@@ -1,5 +1,6 @@
 """Read-only repo audit behind /sekyu-audit: secrets in files and history, exposed emails, sensitive tracked files."""
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -63,8 +64,20 @@ def _npm_findings(repo):
     return findings
 
 
+# Only exact `name==version` lines (optional extras, env marker, comment). Anything else (options, URLs,
+# local paths, ranges) would need pip to resolve or build, which runs code from the audited repo.
+PINNED_LINE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._,\s-]*\])?\s*==\s*[A-Za-z0-9.!+_-]+\s*(;[^#]*)?(#.*)?$")
+
+
+def _is_pinned_only(path):
+    with open(path, encoding="utf-8", errors="replace") as f:
+        lines = [line.strip() for line in f]
+    return all(not line or line.startswith("#") or PINNED_LINE.match(line) for line in lines)
+
+
 def _pip_findings(repo, requirements):
-    args = ["-f", "json"] + [a for req in requirements for a in ("-r", req)]
+    # --disable-pip --no-deps: pip-audit only parses the files, never runs pip (no builds, no index URLs).
+    args = ["-f", "json", "--disable-pip", "--no-deps"] + [a for req in requirements for a in ("-r", req)]
     data, note = _tool_json(repo, "pip-audit", args)
     if note:
         return [("INFO", note)]
@@ -77,13 +90,22 @@ def _pip_findings(repo, requirements):
 def dependency_findings(repo):
     """(severity, text) pairs from npm audit / pip-audit, for whichever manifests exist at the repo root."""
     names = os.listdir(repo)
-    requirements = sorted(n for n in names if n.startswith("requirements") and n.endswith(".txt"))
+    findings = []
+    requirements = []
+    for n in sorted(n for n in names if n.startswith("requirements") and n.endswith(".txt")):
+        if _is_pinned_only(os.path.join(repo, n)):
+            requirements.append(n)
+        else:
+            findings.append(("INFO", f"{n} skipped: only exact name==version lines are audited "
+                                     "(options, URLs, paths, ranges or hashes would make pip run repo code)"))
+    for n in PY_MANIFESTS:
+        if n in names and not requirements:
+            findings.append(("INFO", f"{n} not audited: export pinned requirements.txt to check Python deps"))
     checks = []
     if any(n in names for n in NPM_LOCKS):
         checks.append(("npm", lambda: _npm_findings(repo)))
-    if requirements or any(n in names for n in PY_MANIFESTS):
+    if requirements:
         checks.append(("pip-audit", lambda: _pip_findings(repo, requirements)))
-    findings = []
     for name, check in checks:
         try:
             findings += check()
