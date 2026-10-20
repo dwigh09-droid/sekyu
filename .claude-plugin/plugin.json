@@ -1,0 +1,6 @@
+{
+  "name": "sekyu",
+  "version": "0.1.0",
+  "description": "Scans every file Claude edits for secrets and risky code, and blocks dangerous shell commands.",
+  "author": { "name": "Dwight" }
+}

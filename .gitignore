@@ -1,0 +1,21 @@
+# internal planning and agent scratch
+docs/
+.superpowers/
+.claude/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# secrets and local config
+.env
+.env.*
+!.env.example
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,11 @@
+{
+  "name": "sekyu",
+  "owner": { "name": "Dwight" },
+  "plugins": [
+    {
+      "name": "sekyu",
+      "source": "./",
+      "description": "Scans every file Claude edits for secrets and risky code, and blocks dangerous shell commands."
+    }
+  ]
+}
