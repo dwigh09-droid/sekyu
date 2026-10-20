@@ -43,6 +43,15 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("hooks/audit.py", text)
         self.assertTrue((ROOT / "hooks/audit.py").is_file())
 
+    def test_ci_workflow(self):
+        self.assertTrue((ROOT / ".github/dependabot.yml").is_file())
+        text = (ROOT / ".github/workflows/security.yml").read_text(encoding="utf-8")
+        for word in ("unittest", "gitleaks", "semgrep", "contents: read"):
+            self.assertIn(word, text)
+
+    def test_skill_recommends_security_review(self):
+        self.assertIn("/security-review", (ROOT / "skills/secure-coding/SKILL.md").read_text(encoding="utf-8"))
+
     def test_skill_frontmatter(self):
         text = (ROOT / "skills/secure-coding/SKILL.md").read_text(encoding="utf-8")
         self.assertTrue(text.startswith("---"))

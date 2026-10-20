@@ -1,5 +1,7 @@
 """Read-only repo audit behind /sekyu-audit: secrets in files and history, exposed emails, sensitive tracked files."""
+import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -21,6 +23,73 @@ def _git(repo, *args):
 def _sensitive(path):
     name = path.rsplit("/", 1)[-1].lower()
     return guard._is_env_file(name) or name.endswith(KEY_EXTS) or name.startswith("id_rsa")
+
+
+NPM_LOCKS = ("package-lock.json", "pnpm-lock.yaml", "yarn.lock")
+PY_MANIFESTS = ("pyproject.toml", "poetry.lock")
+NPM_HIGH = {"critical", "high"}
+
+
+def _tool_json(repo, name, args):
+    """Run a dependency scanner; JSON output, or an INFO note when missing or broken. Never raises."""
+    exe = shutil.which(name)  # full path: Windows can't launch .cmd shims by bare name
+    if not exe:
+        return None, f"dependency check not run: install {name}"
+    try:
+        # Exit code is non-zero when vulnerabilities are found, so parse stdout either way.
+        r = subprocess.run([exe, *args], cwd=repo, capture_output=True, encoding="utf-8", errors="replace", timeout=60)
+        return json.loads(r.stdout), None
+    except Exception as e:
+        return None, f"dependency check {name} failed ({type(e).__name__}); skipped"
+
+
+def _npm_findings(repo):
+    data, note = _tool_json(repo, "npm", ["audit", "--json"])
+    if note:
+        return [("INFO", note)]
+    try:
+        with open(os.path.join(repo, "package-lock.json"), encoding="utf-8") as f:
+            installed = json.load(f).get("packages", {})
+    except Exception:
+        installed = {}
+    findings = []
+    for pkg, v in data.get("vulnerabilities", {}).items():
+        version = installed.get(f"node_modules/{pkg}", {}).get("version", f"in {v.get('range', '?')}")
+        fix = v.get("fixAvailable")
+        fixed = fix.get("version", "?") if isinstance(fix, dict) else ("available" if fix else "none")
+        severity = v.get("severity", "?")
+        findings.append(("HIGH" if severity in NPM_HIGH else "MEDIUM",
+                         f"npm {pkg} {version}: {severity} vulnerability, fixed in {fixed}"))
+    return findings
+
+
+def _pip_findings(repo, requirements):
+    args = ["-f", "json"] + [a for req in requirements for a in ("-r", req)]
+    data, note = _tool_json(repo, "pip-audit", args)
+    if note:
+        return [("INFO", note)]
+    deps = data.get("dependencies", []) if isinstance(data, dict) else data  # older pip-audit: bare list
+    # pip-audit reports no severity, so every known vulnerability is HIGH.
+    return [("HIGH", f"pip {d['name']} {d['version']}: {v['id']}, fixed in {', '.join(v.get('fix_versions') or ['none'])}")
+            for d in deps for v in d.get("vulns", [])]
+
+
+def dependency_findings(repo):
+    """(severity, text) pairs from npm audit / pip-audit, for whichever manifests exist at the repo root."""
+    names = os.listdir(repo)
+    requirements = sorted(n for n in names if n.startswith("requirements") and n.endswith(".txt"))
+    checks = []
+    if any(n in names for n in NPM_LOCKS):
+        checks.append(("npm", lambda: _npm_findings(repo)))
+    if requirements or any(n in names for n in PY_MANIFESTS):
+        checks.append(("pip-audit", lambda: _pip_findings(repo, requirements)))
+    findings = []
+    for name, check in checks:
+        try:
+            findings += check()
+        except Exception:
+            findings.append(("INFO", f"dependency check {name} output not understood; skipped"))
+    return findings
 
 
 def audit(repo="."):
@@ -60,6 +129,9 @@ def audit(repo="."):
 
     for path in filter(None, _git(repo, "ls-files", "-ci", "--exclude-standard", "-z").split("\0")):
         result["MEDIUM"].append(f"{path}: tracked but matches .gitignore; 'git rm --cached' it if it should not be public")
+
+    for severity, text in dependency_findings(repo):
+        result[severity].append(text)
     return result
 
 

@@ -20,4 +20,6 @@ Apply these while writing, not after. sekyu scans every edit and reports what sl
 - **Keep TLS verification on.** No `verify=False` or `rejectUnauthorized: false`.
 - **Don't log tokens, passwords, or PII.**
 
+Before merging changes that touch auth, payments, personal data, or permissions, run `/security-review`.
+
 When sekyu reports a finding: fix the root cause. Use `sekyu: ignore` only on a line you have confirmed safe, with the reason in the same comment.

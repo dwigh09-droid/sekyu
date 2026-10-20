@@ -194,5 +194,97 @@ class AuditTests(unittest.TestCase):
             self.assertIn("not a git repository", audit.report(audit.audit(d)))
 
 
+NPM_JSON = {
+    "vulnerabilities": {
+        "lodash": {"severity": "high", "range": "<4.17.21", "fixAvailable": {"name": "lodash", "version": "4.17.21"}},
+        "minimist": {"severity": "low", "range": "<1.2.6", "fixAvailable": False},
+    }
+}
+LOCK_JSON = {"packages": {"node_modules/lodash": {"version": "4.17.15"}}}
+PIP_JSON = {"dependencies": [
+    {"name": "requests", "version": "2.19.0", "vulns": [{"id": "PYSEC-2018-28", "fix_versions": ["2.20.0"]}]},
+    {"name": "flask", "version": "3.0.0", "vulns": []},
+]}
+
+
+def fake_run(outputs, calls):
+    def run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        name = Path(cmd[0]).stem
+        if isinstance(outputs[name], Exception):
+            raise outputs[name]
+        return subprocess.CompletedProcess(cmd, 1, json.dumps(outputs[name]), "")
+    return run
+
+
+class DependencyTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.calls = []
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def deps(self, outputs, found=("npm", "pip-audit")):
+        which = lambda name: f"/bin/{name}" if name in found else None  # noqa: E731
+        with mock.patch("shutil.which", side_effect=which), \
+                mock.patch("subprocess.run", side_effect=fake_run(outputs, self.calls)):
+            return audit.dependency_findings(str(self.dir))
+
+    def text(self, findings, severity=None):
+        return "\n".join(t for s, t in findings if severity in (None, s))
+
+    def test_no_manifests_runs_nothing(self):
+        self.assertEqual(self.deps({}), [])
+        self.assertEqual(self.calls, [])
+
+    def test_npm_audit(self):
+        (self.dir / "package-lock.json").write_text(json.dumps(LOCK_JSON))
+        found = self.deps({"npm": NPM_JSON})
+        high = self.text(found, "HIGH")
+        self.assertIn("lodash", high)
+        self.assertIn("4.17.15", high)
+        self.assertIn("4.17.21", high)
+        self.assertIn("minimist", self.text(found, "MEDIUM"))
+        cmd, kwargs = self.calls[0]
+        self.assertEqual(cmd[1:], ["audit", "--json"])
+        self.assertEqual(kwargs["timeout"], 60)
+
+    def test_pip_audit_requirements(self):
+        (self.dir / "requirements.txt").write_text("requests==2.19.0\n")
+        (self.dir / "requirements-dev.txt").write_text("\n")
+        found = self.deps({"pip-audit": PIP_JSON})
+        high = self.text(found, "HIGH")
+        self.assertIn("requests 2.19.0", high)
+        self.assertIn("PYSEC-2018-28", high)
+        self.assertIn("2.20.0", high)
+        self.assertNotIn("flask", self.text(found))
+        cmd = self.calls[0][0]
+        self.assertEqual(cmd[1:3], ["-f", "json"])
+        self.assertIn("requirements.txt", cmd)
+        self.assertIn("requirements-dev.txt", cmd)
+
+    def test_pip_audit_pyproject_no_r(self):
+        (self.dir / "pyproject.toml").write_text("[project]\n")
+        self.deps({"pip-audit": {"dependencies": []}})
+        self.assertNotIn("-r", self.calls[0][0])
+
+    def test_missing_tool_is_note(self):
+        (self.dir / "yarn.lock").write_text("")
+        (self.dir / "poetry.lock").write_text("")
+        found = self.deps({}, found=())
+        self.assertEqual(self.calls, [])
+        info = self.text(found, "INFO")
+        self.assertIn("not run: install npm", info)
+        self.assertIn("not run: install pip-audit", info)
+
+    def test_tool_failure_fails_open(self):
+        (self.dir / "pnpm-lock.yaml").write_text("")
+        (self.dir / "requirements.txt").write_text("")
+        found = self.deps({"npm": subprocess.TimeoutExpired("npm", 60), "pip-audit": "not json {"})
+        self.assertEqual([s for s, _ in found], ["INFO", "INFO"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,6 @@
 {
   "name": "sekyu",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Scans every file Claude edits for secrets and risky code, blocks dangerous shell commands and leaky commits, and audits repos with /sekyu-audit.",
   "author": { "name": "Dwight" }
 }

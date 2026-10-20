@@ -43,7 +43,9 @@ On `git commit`, the added lines of the staged diff are scanned for secrets with
 |---|---|
 | HIGH | Secrets in tracked files; secrets in any commit on any branch (`git log -p --all`, added lines); tracked sensitive files (`.env*` except templates, `*.pem`, `*.key`, `id_rsa*`) |
 | MEDIUM | Risky code in tracked files; commit author/committer emails that are not GitHub noreply; tracked files that `.gitignore` now excludes |
-| INFO | Noreply commit emails |
+| INFO | Noreply commit emails; dependency checks that did not run |
+
+Dependency check: if the repo root has `package-lock.json`, `pnpm-lock.yaml`, or `yarn.lock`, the audit runs `npm audit --json`. If it has `requirements*.txt`, `pyproject.toml`, or `poetry.lock`, it runs `pip-audit -f json` (with `-r` for each requirements file). Each vulnerable package is listed with installed version, fixed version, and severity: npm critical/high and every pip-audit finding are HIGH, the rest MEDIUM. A missing tool gives a one-line "not run: install X" note. Each tool gets 60 s; a timeout or error skips it.
 
 A secret found in history stays public after you delete the file: rotate it, then rewrite history if needed. Run it directly with `python hooks/audit.py [repo]`.
 
@@ -83,6 +85,8 @@ python -m unittest discover -s tests -v
 ```
 
 Set `SEKYU_NO_EXTERNAL=1` to run only built-in rules (tests do this).
+
+CI (`.github/workflows/security.yml`) runs the tests, gitleaks over full history, and semgrep `p/default` on every push and pull request to `main`. Dependabot keeps the actions current.
 
 ## Layout
 
