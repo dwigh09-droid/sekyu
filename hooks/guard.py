@@ -5,7 +5,10 @@ so run time stays linear on hostile input (no ReDoS -> no hook timeout -> no fai
 """
 import json
 import re
+import subprocess
 import sys
+
+import scan
 
 DOWNLOAD = re.compile(r"\b(curl|wget|iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b", re.I)
 SHELL = re.compile(r"\s*(sudo\s+)?((ba|z|da)?sh|iex|Invoke-Expression)\b", re.I)
@@ -96,10 +99,50 @@ def check_command(cmd):
     return None
 
 
+def _git_runs(cmd, subcommand):
+    return any(t == "git" and nxt == subcommand for tokens in _segments(cmd) for t, nxt in zip(tokens, tokens[1:]))
+
+
+def _git(cwd, *args):
+    # 4 s each, at most 2 calls: stays inside the 10 s hook timeout.
+    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, encoding="utf-8", errors="replace", timeout=4)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr)
+    return r.stdout
+
+
+def _commit_all(cmd):
+    return any(a == "--all" or (a.startswith("-") and not a.startswith("--") and a[1:].isalpha() and "a" in a[1:])
+               for tokens in _segments(cmd) for a in _git_args(tokens, "commit"))
+
+
+def check_git(cmd, cwd=None):
+    """Before git commit/push: require a GitHub noreply identity and no secrets in what is being committed."""
+    cmd = COMMIT_MESSAGE.sub(r'\1""', cmd)
+    committing = _git_runs(cmd, "commit")
+    if not (committing or _git_runs(cmd, "push")):
+        return None
+    try:
+        email = _git(cwd, "config", "user.email").strip()
+        if not email.lower().endswith("@users.noreply.github.com"):
+            return (f"git user.email is '{email}', not a GitHub noreply address, so it would be published in "
+                    "commit history. Ask the user whether to set "
+                    "'git config user.email <id>+<user>@users.noreply.github.com' first")
+        if committing:
+            target = ["HEAD"] if _commit_all(cmd) else ["--cached"]
+            findings = scan.diff_secret_findings(_git(cwd, "diff", *target, "--unified=0", "--no-color", "--no-ext-diff"))
+            if findings:
+                return "secrets in the changes being committed; remove them first:\n" + "\n".join(findings[:20])
+    except Exception:
+        return None  # fail open: no git, not a repo, no HEAD, timeout
+    return None
+
+
 def main():
     try:
         data = json.load(sys.stdin)
-        reason = check_command(data.get("tool_input", {}).get("command", ""))
+        cmd = data.get("tool_input", {}).get("command", "")
+        reason = check_command(cmd) or check_git(cmd, data.get("cwd") or None)
     except Exception:
         return 0  # fail open on malformed input
     if reason:

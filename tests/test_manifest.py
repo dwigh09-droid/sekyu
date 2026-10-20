@@ -37,6 +37,12 @@ class ManifestTests(unittest.TestCase):
         for h in (h for entries in hooks.values() for e in entries for h in e["hooks"]):
             self.assertIn("timeout", h)
 
+    def test_audit_command(self):
+        text = (ROOT / "commands/sekyu-audit.md").read_text(encoding="utf-8")
+        self.assertRegex(text, r"(?m)^description: .+")
+        self.assertIn("hooks/audit.py", text)
+        self.assertTrue((ROOT / "hooks/audit.py").is_file())
+
     def test_skill_frontmatter(self):
         text = (ROOT / "skills/secure-coding/SKILL.md").read_text(encoding="utf-8")
         self.assertTrue(text.startswith("---"))

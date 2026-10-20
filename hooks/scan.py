@@ -80,6 +80,33 @@ def builtin_findings(path, text, only=None):
     return findings
 
 
+SECRET_IDS = {rule_id for rule_id, _, _ in SECRET_RULES}
+HUNK = re.compile(r"@@ -\d+(?:,\d+)? \+(\d+)")
+
+
+def diff_secret_findings(diff):
+    """Secret findings on added lines of a unified diff (git diff / git log -p --format='commit %H')."""
+    findings, commit, path, lineno, in_header = [], "", "", 0, False
+    for line in diff.splitlines():
+        if line.startswith("commit "):  # never a diff body line: those start with + - or space
+            commit, in_header, path = line[7:17] + " ", False, ""
+        elif line.startswith("diff --git "):
+            in_header, path = True, ""
+        elif in_header and line.startswith("+++ "):
+            path = line[6:] if line.startswith("+++ b/") else ""
+        elif m := HUNK.match(line):
+            in_header, lineno = False, int(m.group(1))
+        elif not in_header and path and line.startswith("+"):
+            for f in builtin_findings(path, line[1:]):
+                rest = f[len(path) + 4:]  # strip "path:1: "
+                if rest[1:rest.index("]")] in SECRET_IDS:
+                    findings.append(f"{commit}{path}:{lineno}: {rest}")
+            lineno += 1
+        elif line.startswith(" "):
+            lineno += 1
+    return findings
+
+
 # Exit code each scanner uses for "found something"; any other non-zero code is a tool error.
 FINDING_EXIT = {"semgrep": 1, "gitleaks": 3, "bandit": 1}
 
