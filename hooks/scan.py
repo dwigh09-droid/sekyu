@@ -150,8 +150,9 @@ def changed_lines(tool_input):
 
 
 def main():
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # semgrep box drawing, non-ASCII paths
     try:
-        tool_input = json.load(sys.stdin).get("tool_input", {})
+        tool_input = json.loads(sys.stdin.buffer.read().decode("utf-8-sig")).get("tool_input", {})  # PowerShell pipes add a BOM
         path = tool_input.get("file_path", "")
         if not path or not os.path.isfile(path) or os.path.getsize(path) > MAX_BYTES:
             return 0  # ponytail: files over 1 MB skipped, chunked scan if minified bundles matter

@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -134,6 +135,14 @@ class GuardGitTests(unittest.TestCase):
                            input=json.dumps(payload), capture_output=True, text=True)
         self.assertEqual(r.returncode, 2)
         self.assertIn("noreply", r.stderr)
+
+    def test_main_stderr_utf8_on_cp1252_console(self):
+        self.repo.git("config", "user.email", "┌box@example.com")
+        payload = {"tool_input": {"command": "git push"}, "cwd": str(self.repo.path)}
+        r = subprocess.run([sys.executable, str(ROOT / "hooks" / "guard.py")], input=json.dumps(payload).encode(),
+                           capture_output=True, env=dict(os.environ, PYTHONIOENCODING="cp1252"))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("┌box@example.com", r.stderr.decode("utf-8"))
 
 
 class AuditTests(unittest.TestCase):

@@ -86,6 +86,11 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("sekyu", r.stderr)
 
+    def test_main_utf8_bom_stdin(self):
+        payload = b"\xef\xbb\xbf" + json.dumps({"tool_input": {"command": "rm -rf /"}}).encode()
+        r = subprocess.run([sys.executable, str(ROOT / "hooks" / "guard.py")], input=payload, capture_output=True)
+        self.assertEqual(r.returncode, 2)
+
     def test_main_bad_json(self):
         self.assertEqual(run_guard("not json").returncode, 0)
 

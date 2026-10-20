@@ -139,8 +139,9 @@ def check_git(cmd, cwd=None):
 
 
 def main():
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # cp1252 consoles can't encode paths/emails
     try:
-        data = json.load(sys.stdin)
+        data = json.loads(sys.stdin.buffer.read().decode("utf-8-sig"))  # PowerShell pipes add a BOM
         cmd = data.get("tool_input", {}).get("command", "")
         reason = check_command(cmd) or check_git(cmd, data.get("cwd") or None)
     except Exception:

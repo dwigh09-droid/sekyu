@@ -161,6 +161,21 @@ class MainTests(unittest.TestCase):
         r = run_scan(self.write("big.py", "eval(x)\n" + "#" * 2_000_000))
         self.assertEqual(r.returncode, 0)
 
+    def run_raw(self, payload, **env):
+        return subprocess.run([sys.executable, str(ROOT / "hooks" / "scan.py")], input=payload,
+                              capture_output=True, env=dict(os.environ, SEKYU_NO_EXTERNAL="1", **env))
+
+    def test_main_utf8_bom_stdin(self):
+        path = self.write("bad.py", "eval(x)\n")  # sekyu: ignore -- test fixture
+        r = self.run_raw(b"\xef\xbb\xbf" + json.dumps({"tool_input": {"file_path": str(path)}}).encode())
+        self.assertEqual(r.returncode, 2)
+
+    def test_main_stderr_utf8_on_cp1252_console(self):
+        path = self.write("box┌.py", "eval(x)\n")  # sekyu: ignore -- test fixture
+        r = self.run_raw(json.dumps({"tool_input": {"file_path": str(path)}}).encode(), PYTHONIOENCODING="cp1252")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("box┌.py", r.stderr.decode("utf-8"))
+
 
 class ExternalTests(unittest.TestCase):
     def patch(self, which, run):
