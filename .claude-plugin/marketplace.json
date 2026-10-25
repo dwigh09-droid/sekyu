@@ -5,7 +5,7 @@
     {
       "name": "sekyu",
       "source": "./",
-      "description": "Scans every file Claude edits for secrets and risky code, blocks dangerous shell commands and leaky commits, and audits repos with /sekyu-audit."
+      "description": "Scans every file Claude edits for secrets and risky code, blocks dangerous shell commands and leaky commits, audits repos (code vulns, dependencies, language versions) with /sekyu-audit, and hunts RCE with /sekyu-rce."
     }
   ]
 }

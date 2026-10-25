@@ -3,9 +3,11 @@ import json
 import re
 import os
 import subprocess
+import tempfile
 import sys
 
 import guard
+import runtimes
 import scan
 
 SEVERITIES = ("HIGH", "MEDIUM", "INFO")
@@ -17,7 +19,7 @@ def _git(repo, *args):
     git = scan.find_tool("git")  # never a git.exe planted in the audited repo
     if not git:
         raise RuntimeError("git not found")
-    r = subprocess.run([git, *args], cwd=repo, capture_output=True, encoding="utf-8", errors="replace")
+    r = subprocess.run([git, *guard.SAFE_GIT_ARGS, *args], cwd=repo, capture_output=True, encoding="utf-8", errors="replace")
     if r.returncode != 0:
         raise RuntimeError(r.stderr.strip())
     return r.stdout
@@ -41,6 +43,8 @@ def _tool_json(repo, name, args):
     try:
         # Exit code is non-zero when vulnerabilities are found, so parse stdout either way.
         r = subprocess.run([exe, *args], cwd=repo, capture_output=True, encoding="utf-8", errors="replace", timeout=60)
+        if not r.stdout.strip():
+            return None, None  # nothing to scan (osv-scanner exits 128 with no output when no lockfiles exist)
         return json.loads(r.stdout), None
     except Exception as e:
         return None, f"dependency check {name} failed ({type(e).__name__}); skipped"
@@ -89,8 +93,36 @@ def _pip_findings(repo, requirements):
             for d in deps for v in d.get("vulns", [])]
 
 
+def _osv_findings(repo):
+    """osv-scanner reads every lockfile it knows (npm, pip, Go, Rust, Maven, NuGet, ...) without running code."""
+    with tempfile.TemporaryDirectory() as d:
+        config = os.path.join(d, "osv-scanner.toml")
+        open(config, "w").close()  # empty config: the audited repo's own ignore list must not hide its vulns
+        data, note = _tool_json(repo, "osv-scanner", ["scan", "source", "--format", "json", "-r", "--config", config, "."])
+    if note:
+        return [("INFO", note)]
+    findings = []
+    for result in (data or {}).get("results", []):
+        for p in result.get("packages", []):
+            pkg = p["package"]
+            score = {i: g.get("max_severity") for g in p.get("groups", []) for i in g.get("ids", [])}
+            for v in p.get("vulnerabilities", []):
+                try:
+                    high = float(score.get(v["id"]) or 0) >= 7.0  # CVSS 7+ = high/critical
+                except ValueError:
+                    high = False
+                findings.append(("HIGH" if high else "MEDIUM",
+                                 f"{pkg.get('ecosystem', '?')} {pkg['name']} {pkg.get('version', '?')}: {v['id']}"))
+    return findings
+
+
 def dependency_findings(repo):
-    """(severity, text) pairs from npm audit / pip-audit, for whichever manifests exist at the repo root."""
+    """(severity, text) pairs from osv-scanner, or npm audit / pip-audit when osv-scanner is not installed."""
+    if scan.find_tool("osv-scanner"):
+        try:
+            return _osv_findings(repo)
+        except Exception:
+            return [("INFO", "dependency check osv-scanner output not understood; skipped")]
     names = os.listdir(repo)
     findings = []
     requirements = []
@@ -116,13 +148,54 @@ def dependency_findings(repo):
     return findings
 
 
-def audit(repo="."):
+SEMGREP_PACKS = ("p/default", "p/security-audit", "p/command-injection")  # taint rules: input -> exec/shell/deserialize
+SEMGREP_SEVERITY = {"ERROR": "HIGH", "WARNING": "MEDIUM"}
+SEMGREP_MAX = 100
+
+
+def semgrep_findings(repo):
+    """Whole-repo semgrep scan with RCE/injection data-flow rules, about 30 languages."""
+    exe = scan.find_tool("semgrep")
+    if not exe:
+        return [("INFO", "code vulnerability scan not run: install semgrep (pip install semgrep)")]
+    args = [a for pack in SEMGREP_PACKS for a in ("--config", pack)]
+    try:
+        r = subprocess.run([exe, "scan", *args, "--json", "--metrics=off", "--disable-nosem", "--quiet", "."],
+                           cwd=repo, capture_output=True, encoding="utf-8", errors="replace", timeout=600)
+        results = json.loads(r.stdout)["results"]
+    except Exception as e:
+        return [("INFO", f"code vulnerability scan failed ({type(e).__name__}); skipped")]
+    findings = []
+    for item in results[:SEMGREP_MAX]:
+        path = item["path"]
+        path = os.path.relpath(path, repo) if os.path.isabs(path) else path
+        message = item["extra"].get("message", "").strip().splitlines()[0] if item["extra"].get("message") else ""
+        findings.append((SEMGREP_SEVERITY.get(item["extra"].get("severity"), "INFO"),
+                         f"{path.replace(os.sep, '/')}:{item['start']['line']}: [semgrep {item['check_id']}] {message}"))
+    if len(results) > SEMGREP_MAX:
+        findings.append(("INFO", f"semgrep: {len(results) - SEMGREP_MAX} more findings not shown"))
+    return findings
+
+
+def audit(repo=".", external=None):
+    """external: run network/slow checks (semgrep, language updates). Default: on unless SEKYU_NO_EXTERNAL is set."""
+    if external is None:
+        external = not os.environ.get("SEKYU_NO_EXTERNAL")
     result = {s: [] for s in SEVERITIES}
     try:
         repo = _git(repo, "rev-parse", "--show-toplevel").strip()
     except Exception:
         result["INFO"].append(f"{os.path.abspath(repo)}: not a git repository (or git not installed); nothing audited")
         return result
+
+    for entry in guard.risky_git_config(repo, git=_git):
+        result["HIGH"].append(f".git/config {entry}: makes git run a program; a hostile repo uses this to run code. "
+                              "Review it before running git here")
+    hooks = os.path.join(repo, _git(repo, "rev-parse", "--git-path", "hooks").strip())
+    if os.path.isdir(hooks):
+        for name in sorted(os.listdir(hooks)):
+            if not name.endswith(".sample"):
+                result["MEDIUM"].append(f".git/hooks/{name}: runs automatically on git operations; review it")
 
     for path in filter(None, _git(repo, "ls-files", "-z").split("\0")):
         full = os.path.join(repo, path)
@@ -136,7 +209,7 @@ def audit(repo="."):
                 result["HIGH" if rule in scan.SECRET_IDS else "MEDIUM"].append(finding)
 
     try:
-        history = _git(repo, "log", "-p", "--all", "--unified=0", "--no-color", "--no-ext-diff", "--format=commit %H")
+        history = _git(repo, "log", "-p", "--all", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv", "--format=commit %H")
     except Exception:
         history = ""  # no commits yet
     result["HIGH"] += [f"history {f} (rewrite history and rotate the secret)" for f in scan.diff_secret_findings(history)]
@@ -154,8 +227,12 @@ def audit(repo="."):
     for path in filter(None, _git(repo, "ls-files", "-ci", "--exclude-standard", "-z").split("\0")):
         result["MEDIUM"].append(f"{path}: tracked but matches .gitignore; 'git rm --cached' it if it should not be public")
 
-    for severity, text in dependency_findings(repo):
-        result[severity].append(text)
+    checks = [dependency_findings]
+    if external:
+        checks += [semgrep_findings, runtimes.runtime_findings]
+    for check in checks:
+        for severity, text in check(repo):
+            result[severity].append(text)
     return result
 
 

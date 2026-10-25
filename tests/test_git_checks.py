@@ -159,7 +159,7 @@ class AuditTests(unittest.TestCase):
         r.commit("build/out.txt", "x\n")
         r.git("config", "user.email", NOREPLY)
         r.commit("ok.txt", "fine\n")
-        cls.result = audit.audit(str(r.path))
+        cls.result = audit.audit(str(r.path), external=False)
         cls.text = audit.report(cls.result)
 
     @classmethod
@@ -216,13 +216,28 @@ PIP_JSON = {"dependencies": [
 ]}
 
 
+OSV_JSON = {"results": [{"source": {"path": "/r/package-lock.json"}, "packages": [
+    {"package": {"name": "lodash", "version": "4.17.15", "ecosystem": "npm"},
+     "vulnerabilities": [{"id": "GHSA-x"}, {"id": "GHSA-y"}],
+     "groups": [{"ids": ["GHSA-x"], "max_severity": "9.1"}, {"ids": ["GHSA-y"], "max_severity": "5.3"}]},
+    {"package": {"name": "serde", "version": "1.0.0", "ecosystem": "crates.io"},
+     "vulnerabilities": [{"id": "RUSTSEC-1"}], "groups": [{"ids": ["RUSTSEC-1"], "max_severity": ""}]},
+]}]}
+SEMGREP_JSON = {"results": [
+    {"check_id": "python.lang.security.audit.subprocess-shell-true", "path": "app.py", "start": {"line": 3},
+     "extra": {"severity": "ERROR", "message": "Found shell=True.\nMore text."}},
+    {"check_id": "js.warn", "path": "web/a.js", "start": {"line": 1}, "extra": {"severity": "WARNING", "message": "meh"}},
+], "errors": []}
+
+
 def fake_run(outputs, calls):
     def run(cmd, **kwargs):
         calls.append((cmd, kwargs))
         name = Path(cmd[0]).stem
         if isinstance(outputs[name], Exception):
             raise outputs[name]
-        return subprocess.CompletedProcess(cmd, 1, json.dumps(outputs[name]), "")
+        out = outputs[name]
+        return subprocess.CompletedProcess(cmd, 1, "" if out == "" else json.dumps(out), "")
     return run
 
 
@@ -307,11 +322,130 @@ class DependencyTests(unittest.TestCase):
         self.assertIn("not run: install npm", info)
         self.assertIn("not run: install pip-audit", info)
 
+    def test_osv_scanner_preferred_for_all_ecosystems(self):
+        (self.dir / "package-lock.json").write_text(json.dumps(LOCK_JSON))
+        (self.dir / "requirements.txt").write_text("requests==2.19.0\n")
+        found = self.deps({"osv-scanner": OSV_JSON}, found=("osv-scanner", "npm", "pip-audit"))
+        self.assertEqual([Path(c[0][0]).stem for c in self.calls], ["osv-scanner"])  # replaces npm/pip-audit
+        cmd = self.calls[0][0]
+        for arg in ("scan", "source", "--format", "json", "-r", "--config"):
+            self.assertIn(arg, cmd)  # --config: ignore the repo's own osv-scanner.toml suppressions
+        self.assertIn("npm lodash 4.17.15: GHSA-x", self.text(found, "HIGH"))
+        medium = self.text(found, "MEDIUM")
+        self.assertIn("GHSA-y", medium)
+        self.assertIn("crates.io serde 1.0.0: RUSTSEC-1", medium)
+
+    def test_osv_scanner_covers_other_lockfiles(self):
+        (self.dir / "Cargo.lock").write_text("")
+        self.deps({"osv-scanner": {"results": []}}, found=("osv-scanner",))
+        self.assertEqual(len(self.calls), 1)
+
+    def test_osv_scanner_no_output_is_quiet(self):
+        (self.dir / "go.mod").write_text("module x\n")
+        self.assertEqual(self.deps({"osv-scanner": ""}, found=("osv-scanner",)), [])  # exit 128, empty stdout
+
     def test_tool_failure_fails_open(self):
         (self.dir / "pnpm-lock.yaml").write_text("")
         (self.dir / "requirements.txt").write_text("")
         found = self.deps({"npm": subprocess.TimeoutExpired("npm", 60), "pip-audit": "not json {"})
         self.assertEqual([s for s, _ in found], ["INFO", "INFO"])
+
+
+class SemgrepAuditTests(unittest.TestCase):
+    def run_semgrep(self, output, found=True):
+        calls = []
+        which = lambda name: f"/bin/{name}" if found else None  # noqa: E731
+        with mock.patch("shutil.which", side_effect=which), \
+                mock.patch("subprocess.run", side_effect=fake_run({"semgrep": output}, calls)):
+            return audit.semgrep_findings(tempfile.gettempdir()), calls
+
+    def test_taint_packs_and_severity(self):
+        found, calls = self.run_semgrep(SEMGREP_JSON)
+        cmd = calls[0][0]
+        for arg in ("p/security-audit", "p/command-injection", "--json", "--disable-nosem"):
+            self.assertIn(arg, cmd)  # --disable-nosem: an audited repo must not silence its own findings
+        self.assertIn(("HIGH", "app.py:3: [semgrep python.lang.security.audit.subprocess-shell-true] Found shell=True."),  # sekyu: ignore -- fixture
+                      found)
+        self.assertIn("MEDIUM", [s for s, t in found if "web/a.js:1" in t])
+
+    def test_missing_semgrep_is_note(self):
+        found, calls = self.run_semgrep({}, found=False)
+        self.assertEqual(calls, [])
+        self.assertIn("install semgrep", found[0][1])
+
+
+def hostile_repo():
+    """Repo whose own .git/config runs commands on read-only git use (fsmonitor, textconv). Harmless marker files."""
+    r = Repo()
+    r.commit("a.txt", "one\n")
+    r.commit(".gitattributes", "*.txt diff=evil\n")
+    r.commit("a.txt", "two\n")
+    script = r.path / "fsmon.sh"
+    script.write_text(f'#!/bin/sh\necho ran >> "{(r.path / "PROOF_fsmonitor").as_posix()}"\n', encoding="utf-8")
+    os.chmod(script, 0o700)  # owner-only; executable so git can run it
+    r.git("config", "core.fsmonitor", script.as_posix())
+    r.git("config", "diff.evil.textconv", f"sh -c 'echo ran >> \"{(r.path / 'PROOF_textconv').as_posix()}\"; cat'")
+    return r
+
+
+class HostileGitConfigTests(unittest.TestCase):
+    def setUp(self):
+        self.repo = hostile_repo()
+
+    def tearDown(self):
+        self.repo.close()
+
+    def proofs(self):
+        return sorted(p.name for p in self.repo.path.glob("PROOF_*"))
+
+    def test_audit_never_runs_repo_config_commands(self):
+        result = audit.audit(str(self.repo.path), external=False)
+        self.assertEqual(self.proofs(), [])
+        high = "\n".join(result["HIGH"])
+        self.assertIn("core.fsmonitor", high)
+        self.assertIn("diff.evil.textconv", high)
+
+    def test_audit_reports_git_hooks(self):
+        hook = self.repo.path / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        result = audit.audit(str(self.repo.path), external=False)
+        self.assertTrue(any("pre-commit" in m for m in result["MEDIUM"]), result["MEDIUM"])
+        self.assertFalse(any(".sample" in m for m in result["MEDIUM"]))
+
+    def test_guard_blocks_commit_and_runs_nothing(self):
+        self.repo.write("a.txt", "three\n")
+        self.repo.git("-c", "core.fsmonitor=false", "add", "a.txt")
+        reason = guard.check_git("git commit -m x", str(self.repo.path))
+        self.assertIsNotNone(reason)
+        self.assertIn("core.fsmonitor", reason)
+        self.assertEqual(self.proofs(), [])
+
+    def test_safe_config_values_allowed(self):
+        r = Repo()
+        try:
+            r.commit("a.txt", "x\n")
+            r.git("config", "core.fsmonitor", "false")
+            r.git("config", "alias.st", "status")
+            self.assertEqual(guard.risky_git_config(str(r.path)), [])
+            r.git("config", "alias.pwn", "!sh -c id")
+            self.assertEqual(guard.risky_git_config(str(r.path)), ["alias.pwn=!sh -c id"])
+        finally:
+            r.close()
+
+
+class AuditExternalTests(unittest.TestCase):
+    def test_external_checks_merged(self):
+        with tempfile.TemporaryDirectory() as d:
+            subprocess.run(["git", "init", "-q", d], check=True)
+            with mock.patch.object(audit, "semgrep_findings", return_value=[("HIGH", "rce here")]) as sg, \
+                    mock.patch.object(audit.runtimes, "runtime_findings", return_value=[("HIGH", "python 3.8 eol")]) as rt:
+                result = audit.audit(d, external=True)
+                sg.assert_called_once()
+                rt.assert_called_once()
+                self.assertIn("rce here", result["HIGH"])
+                self.assertIn("python 3.8 eol", result["HIGH"])
+                audit.audit(d, external=False)
+                sg.assert_called_once()  # not called again
 
 
 if __name__ == "__main__":

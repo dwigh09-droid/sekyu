@@ -12,8 +12,9 @@ Prompts are suggestions; hooks always run. sekyu puts deterministic checks in th
 |---|---|---|
 | `hooks/scan.py` | After `Edit`, `Write`, `MultiEdit` | Scans the changed file. Findings: exit code 2, report sent to Claude, Claude fixes. Clean: silent. |
 | `hooks/guard.py` | Before `Bash`, `PowerShell` | Blocks dangerous commands (pipe-to-shell, `rm -rf /`, force push, `chmod 777`, committing `.env`). Claude is told why. |
-| `hooks/guard.py` | Before `git commit`, `git push` | Blocks if `git config user.email` is not a `@users.noreply.github.com` address, so Claude asks you first. On commit, also blocks secrets in the staged diff (or all tracked changes for `commit -a`). |
-| `/sekyu-audit` | You run it | Read-only audit of the whole repo and its history. See [Repo audit](#repo-audit). |
+| `hooks/guard.py` | Before `git commit`, `git push` | Blocks if the repo's own `.git/config` makes git run programs, or if `git config user.email` is not a `@users.noreply.github.com` address, so Claude asks you first. On commit, also blocks secrets in the staged diff (or all tracked changes for `commit -a`). |
+| `/sekyu-audit` | You run it | Read-only audit of the whole repo and its history, code vulnerabilities, dependencies, and language versions. See [Repo audit](#repo-audit). |
+| `/sekyu-rce` | You run it | Deep AI hunt for code execution bugs (RCE) that pattern scanners miss. See [RCE hunt](#rce-hunt). |
 | `skills/secure-coding` | Claude loads it when writing code that touches input, auth, SQL, files, or secrets | Short rule set: validate at trust boundaries, parameterized queries, encode output, no hardcoded secrets, least privilege. |
 
 ### Scan layers
@@ -41,13 +42,23 @@ On `git commit`, the added lines of the staged diff are scanned for secrets with
 
 | Severity | Finding |
 |---|---|
-| HIGH | Secrets in tracked files; secrets in any commit on any branch (`git log -p --all`, added lines); tracked sensitive files (`.env*` except templates, `*.pem`, `*.key`, `id_rsa*`) |
-| MEDIUM | Risky code in tracked files; commit author/committer emails that are not GitHub noreply; tracked files that `.gitignore` now excludes |
+| HIGH | Repo `.git/config` entries that make git run programs (`core.fsmonitor`, textconv, filters, `!` aliases, hooksPath; sign of a hostile repo); semgrep ERROR findings (RCE, injection); vulnerable dependencies with CVSS 7+; end-of-life language runtimes; secrets in tracked files; secrets in any commit on any branch (`git log -p --all`, added lines); tracked sensitive files (`.env*` except templates, `*.pem`, `*.key`, `id_rsa*`) |
+| MEDIUM | Non-sample scripts in `.git/hooks`; semgrep WARNING findings; other vulnerable dependencies; runtimes missing security patches; risky code in tracked files; commit author/committer emails that are not GitHub noreply; tracked files that `.gitignore` now excludes |
 | INFO | Noreply commit emails; dependency checks that did not run |
 
-Dependency check: if the repo root has `package-lock.json`, `pnpm-lock.yaml`, or `yarn.lock`, the audit runs `npm audit --json`. If it has `requirements*.txt`, `pyproject.toml`, or `poetry.lock`, it runs `pip-audit -f json` (with `-r` for each requirements file). Each vulnerable package is listed with installed version, fixed version, and severity: npm critical/high and every pip-audit finding are HIGH, the rest MEDIUM. A missing tool gives a one-line "not run: install X" note. Each tool gets 60 s; a timeout or error skips it.
+**Code vulnerabilities.** If `semgrep` is installed, the whole repo is scanned with the `p/default`, `p/security-audit`, and `p/command-injection` rule packs. These follow untrusted input to code execution, shell commands, unsafe deserialization, and injection sinks in about 30 languages. `nosemgrep` comments are ignored during audits, because an audited repo controls them. Rules download from semgrep.dev.
+
+**Dependencies.** If `osv-scanner` is installed, it reads every lockfile it knows (npm, PyPI, Go, Rust, Maven, NuGet, Composer, RubyGems, and more) without running any project code; CVSS 7+ is HIGH. The repo's own `osv-scanner.toml` ignore list is not used. Package names and versions are sent to osv.dev. Without osv-scanner, the audit falls back to `npm audit --json` for JS lockfiles and to `pip-audit --disable-pip --no-deps` for `requirements*.txt` files that contain only exact `name==version` lines. Other requirements files are skipped, because resolving them makes pip build packages, which runs code from the repo.
+
+**Language updates.** For each runtime the project uses (Python, Node.js, Go, Ruby, PHP), the audit takes the version from pin files (`.python-version`, `.nvmrc`, `.node-version`, `go.mod`, `.ruby-version`), from Dockerfile `FROM` images, or from the installed runtime. It checks that version against endoflife.date: end of life is HIGH, a missing patch release is MEDIUM. Only the runtime name is sent.
+
+Set `SEKYU_NO_EXTERNAL=1` to skip the semgrep scan and the language check (no network). Each external tool fails open: when one is missing or errors, you get an INFO note.
 
 A secret found in history stays public after you delete the file: rotate it, then rewrite history if needed. Run it directly with `python hooks/audit.py [repo]`.
+
+### RCE hunt
+
+`/sekyu-rce [path or focus]` starts the `rce-hunter` agent. It maps every input an attacker controls, traces each one to code-execution sinks in any language, and tries to trigger each candidate with a harmless marker in a temporary copy. Sinks include dynamic code, shell and argument injection, deserialization, template injection, dynamic imports, package builds, attacker config files, planted executables, file writes that lead to code, chained web bugs, and memory corruption. Findings are reported as **proven** (the marker ran) or **suspected**. It never runs the repo's own install, build, or test scripts. It uses many tokens on large codebases. A clean result means no RCE was found in what was read, not a guarantee.
 
 ### False positives
 
@@ -71,11 +82,15 @@ In Claude Code:
 Restart the session. Optional, for deeper scans:
 
 ```bash
-pip install semgrep bandit
+pip install semgrep bandit pip-audit
 ```
 
 ```bash
 winget install gitleaks
+```
+
+```bash
+winget install Google.OSVScanner
 ```
 
 ## Develop
@@ -97,7 +112,10 @@ hooks/hooks.json                 hook wiring
 hooks/scan.py                    post-edit file scanner
 hooks/guard.py                   pre-command blocker and commit guard
 hooks/audit.py                   repo audit behind /sekyu-audit
+hooks/runtimes.py                language-update check (endoflife.date)
 commands/sekyu-audit.md          /sekyu-audit slash command
+commands/sekyu-rce.md            /sekyu-rce slash command
+agents/rce-hunter.md             RCE hunting agent
 skills/secure-coding/SKILL.md    secure-coding rules for Claude
 tests/                           unittest suite
 ```

@@ -52,6 +52,21 @@ class ManifestTests(unittest.TestCase):
     def test_skill_recommends_security_review(self):
         self.assertIn("/security-review", (ROOT / "skills/secure-coding/SKILL.md").read_text(encoding="utf-8"))
 
+    def test_rce_hunter_agent(self):
+        text = (ROOT / "agents/rce-hunter.md").read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("---"))
+        self.assertIn("name: rce-hunter", text)
+        self.assertRegex(text, r"(?m)^description: .+")
+        lower = text.lower()
+        for must in ("deserializ", "subprocess", "template", "planted", "path traversal", "eval",
+                     "proven", "suspected", "harmless marker", "never run the repo's own"):
+            self.assertIn(must, lower)
+
+    def test_rce_command_uses_agent(self):
+        text = (ROOT / "commands/sekyu-rce.md").read_text(encoding="utf-8")
+        self.assertRegex(text, r"(?m)^description: .+")
+        self.assertIn("sekyu:rce-hunter", text)
+
     def test_skill_frontmatter(self):
         text = (ROOT / "skills/secure-coding/SKILL.md").read_text(encoding="utf-8")
         self.assertTrue(text.startswith("---"))

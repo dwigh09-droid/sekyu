@@ -1,5 +1,5 @@
 ---
-description: Read-only security audit of this git repo - secrets in files and history, exposed commit emails, sensitive tracked files
+description: Read-only security audit of this git repo - secrets in files and history, exposed commit emails, sensitive tracked files, code vulnerabilities (semgrep), vulnerable dependencies, outdated language versions
 allowed-tools: Bash(python "${CLAUDE_PLUGIN_ROOT}/hooks/audit.py")
 ---
 

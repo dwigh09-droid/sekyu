@@ -103,15 +103,41 @@ def _git_runs(cmd, subcommand):
     return any(t == "git" and nxt == subcommand for tokens in _segments(cmd) for t, nxt in zip(tokens, tokens[1:]))
 
 
-def _git(cwd, *args):
-    # 4 s each, at most 2 calls: stays inside the 10 s hook timeout.
+# A repo's own .git/config can make git run programs, even for read-only commands (core.fsmonitor on
+# ls-files/diff, textconv on diff/log -p, clean filters on diff of the worktree). Zips and copied folders
+# carry .git/config; a normal clone does not.
+SAFE_GIT_ARGS = ("-c", "core.fsmonitor=false")
+RISKY_GIT_KEY = re.compile(r"^(core\.(fsmonitor|hookspath|sshcommand|pager|editor|askpass)|sequence\.editor"
+                           r"|gpg\.(\w+\.)?program|credential\.(\S+\.)?helper|diff\.\S+\.(textconv|command)"
+                           r"|merge\.\S+\.driver|filter\.\S+\.(clean|smudge|process)|uploadpack\.packobjectshook|alias\.\S+)$")
+SAFE_FSMONITOR = {"", "false", "true", "0", "1", "no", "yes", "off", "on"}
+
+
+def _git(cwd, *args, timeout=3):
+    # 3 s each, at most 3 calls: stays inside the 10 s hook timeout.
     git = scan.find_tool("git")  # never a git.exe planted in the repo
     if not git:
         raise RuntimeError("git not found")
-    r = subprocess.run([git, *args], cwd=cwd, capture_output=True, encoding="utf-8", errors="replace", timeout=4)
+    r = subprocess.run([git, *SAFE_GIT_ARGS, *args], cwd=cwd, capture_output=True, encoding="utf-8",
+                       errors="replace", timeout=timeout)
     if r.returncode != 0:
         raise RuntimeError(r.stderr)
     return r.stdout
+
+
+def risky_git_config(cwd, git=_git):
+    """'key=value' for each repo-local git setting that makes git run a program."""
+    risky = []
+    for entry in filter(None, git(cwd, "config", "--list", "--local", "--includes", "-z").split("\0")):
+        key, _, value = entry.partition("\n")
+        k = key.lower()
+        if not RISKY_GIT_KEY.match(k):
+            continue
+        if (k == "core.fsmonitor" and value.strip().lower() in SAFE_FSMONITOR) or \
+                (k.startswith("alias.") and not value.startswith("!")):
+            continue
+        risky.append(f"{key}={value}")
+    return risky
 
 
 def _commit_all(cmd):
@@ -126,6 +152,10 @@ def check_git(cmd, cwd=None):
     if not (committing or _git_runs(cmd, "push")):
         return None
     try:
+        risky = risky_git_config(cwd)
+        if risky:
+            return ("this repo's own .git/config makes git run programs (" + "; ".join(risky[:5]) + "). A hostile "
+                    "repo uses this to run code on commit. Ask the user to review .git/config first")
         email = _git(cwd, "config", "user.email").strip()
         if not email.lower().endswith("@users.noreply.github.com"):
             return (f"git user.email is '{email}', not a GitHub noreply address, so it would be published in "
@@ -133,7 +163,7 @@ def check_git(cmd, cwd=None):
                     "'git config user.email <id>+<user>@users.noreply.github.com' first")
         if committing:
             target = ["HEAD"] if _commit_all(cmd) else ["--cached"]
-            findings = scan.diff_secret_findings(_git(cwd, "diff", *target, "--unified=0", "--no-color", "--no-ext-diff"))
+            findings = scan.diff_secret_findings(_git(cwd, "diff", *target, "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv"))
             if findings:
                 return "secrets in the changes being committed; remove them first:\n" + "\n".join(findings[:20])
     except Exception:
