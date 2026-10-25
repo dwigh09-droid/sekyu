@@ -1,6 +1,15 @@
 # sekyu
 
-A Claude Code plugin that checks every file Claude writes and every shell command Claude runs, and pushes findings back to Claude so it fixes them before moving on.
+**A security guard for Claude Code.** sekyu watches what your AI coding assistant writes and runs, catches security mistakes as they happen, and makes Claude fix them before moving on.
+
+## What is sekyu?
+
+AI assistants write code fast, including insecure code: hardcoded passwords, `eval` on user input, SQL built from strings, dangerous shell commands. sekyu is a free, open-source plugin for [Claude Code](https://claude.com/claude-code) that puts real security checks in the loop instead of trusting the model to remember the rules:
+
+- **Checks every edit.** Each file Claude writes is scanned for leaked secrets and risky code (built-in rules, plus semgrep, gitleaks and bandit when installed). Findings go straight back to Claude, which fixes them.
+- **Blocks dangerous commands.** `curl ... | sh`, `rm -rf /`, force pushes, committing `.env` files, and commits that would publish your personal email or secrets are stopped before they run.
+- **Audits whole repos** with `/sekyu-audit`: secrets in files and git history, exposed commit emails, code vulnerabilities in about 30 languages, vulnerable dependencies in every major ecosystem, outdated or end-of-life language versions, and git configs that run hidden commands.
+- **Hunts RCE** with `/sekyu-rce`: an AI agent that traces attacker input to code-execution bugs in any language and proves each one with a harmless test before reporting it.
 
 Prompts are suggestions; hooks always run. sekyu puts deterministic checks in the loop instead of trusting the model to remember secure-coding rules.
 
