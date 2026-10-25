@@ -35,7 +35,9 @@ Trace data flow across functions and files, through renames, string building, an
 - **chained web bugs**: SQL injection reaching `xp_cmdshell`/`COPY ... PROGRAM`/UDFs, XXE, SSRF to metadata or internal admin APIs, prototype pollution to a known gadget, header/CRLF injection into a config
 - **memory corruption** (C, C++, unsafe Rust/Go cgo): overflows, use-after-free, format strings (`printf(input)`) on input-facing parsers
 
-For each candidate write the chain: `source (file:line) -> transforms -> sink (file:line)`, and what blocks it, if anything (validation, allow-list, sandbox, auth).
+For every external program the code launches on attacker-influenced input (package managers, auditors, compilers, linters, git, archivers), find out from its docs or source what it does with that input: does it build, install, resolve, run scripts or hooks, or read config from the input's folder? A tool that "only checks" may still build or execute. For every launch, also state exactly how the program's path is resolved (bare name, which/where lookup, PATH entries, current folder, the target's own folder) and test whether a file the attacker ships can be picked instead.
+
+For each candidate write the chain: `source (file:line) -> transforms -> sink (file:line)`, and what blocks it, if anything (validation, allow-list, sandbox, auth). Never call a sink safe or mitigated without quoting the exact target line (file:line) that makes it safe. If you cannot quote that line, it is not mitigated.
 
 ## 3. Prove it, safely
 
@@ -44,6 +46,8 @@ Try to trigger each candidate with a **harmless marker**: a payload of your own 
 - Never run the repo's own install, build, test, setup, or post-install scripts, its binaries, or anything it downloads: if this repo is hostile, that is the attack. If proving a bug would require running them, stop and report it as suspected.
 - No network calls to hosts other than localhost, no destructive commands, no persistence, nothing outside the temp folder.
 - Call only the specific function or entry point under test, with your marker as the attacker input.
+
+- Your own shell may have protections the real runtime lacks (on Windows, Claude Code sets `NoDefaultCurrentDirectoryInExePath=1`; sandboxes, env vars, newer interpreter versions). Before calling a candidate not exploitable, rerun the proof with those protections removed, and say which environments it affects.
 
 A finding is **proven** only when the marker appeared. Otherwise it is **suspected**, with the missing step stated.
 
