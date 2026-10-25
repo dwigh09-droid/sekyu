@@ -382,7 +382,8 @@ def hostile_repo():
     r.commit("a.txt", "two\n")
     script = r.path / "fsmon.sh"
     script.write_text(f'#!/bin/sh\necho ran >> "{(r.path / "PROOF_fsmonitor").as_posix()}"\n', encoding="utf-8")
-    os.chmod(script, 0o700)  # owner-only; executable so git can run it
+    # nosemgrep: insecure-file-permissions (owner-only; the fixture script must be executable)
+    os.chmod(script, 0o700)  # nosec B103
     r.git("config", "core.fsmonitor", script.as_posix())
     r.git("config", "diff.evil.textconv", f"sh -c 'echo ran >> \"{(r.path / 'PROOF_textconv').as_posix()}\"; cat'")
     return r
@@ -431,6 +432,99 @@ class HostileGitConfigTests(unittest.TestCase):
             self.assertEqual(guard.risky_git_config(str(r.path)), ["alias.pwn=!sh -c id"])
         finally:
             r.close()
+
+
+def worktree_config_repo(key, value):
+    """Repo that hides a setting in .git/config.worktree, which `git config --local` does not read."""
+    r = Repo()
+    r.git("config", "core.repositoryformatversion", "1")
+    r.git("config", "extensions.worktreeConfig", "true")
+    r.git("config", "--worktree", key, value)
+    return r
+
+
+class HiddenConfigTests(unittest.TestCase):
+    def test_worktree_scope_is_checked(self):
+        r = worktree_config_repo("core.fsmonitor", "echo hi")
+        try:
+            self.assertIn("core.fsmonitor=echo hi", guard.risky_git_config(str(r.path)))
+        finally:
+            r.close()
+
+    def test_guard_blocks_hidden_clean_filter_and_runs_nothing(self):
+        r = Repo()
+        try:
+            r.commit(".gitattributes", "*.txt filter=x\n")
+            r.commit("a.txt", "one\n")
+            r.git("config", "core.repositoryformatversion", "1")
+            r.git("config", "extensions.worktreeConfig", "true")
+            proof = (r.path / "PROOF_filter").as_posix()
+            r.git("config", "--worktree", "filter.x.clean", f"sh -c 'echo ran >> \"{proof}\"; cat'")
+            r.write("a.txt", "two\n")
+            reason = guard.check_git("git commit -a -m x", str(r.path))
+            self.assertIsNotNone(reason)
+            self.assertIn("filter.x.clean", reason)
+            self.assertFalse((r.path / "PROOF_filter").exists())
+        finally:
+            r.close()
+
+    def test_more_risky_keys(self):
+        risky = [("gpg.ssh.defaultKeyCommand", "sh -c id"), ("remote.r.url", "ext::sh -c id"),
+                 ("remote.r.pushurl", "fd::3"), ("remote.r.receivepack", "sh -c id"),
+                 ("remote.r.uploadpack", "sh -c id"), ("core.gitProxy", "sh -c id"), ("diff.external", "sh -c id"),
+                 ("core.alternateRefsCommand", "sh -c id"), ("trailer.x.cmd", "sh -c id"),
+                 ("hook.x.command", "sh -c id"), ("protocol.ext.allow", "always"), ("protocol.allow", "always")]
+        safe = [("remote.origin.url", "https://github.com/a/b.git"), ("protocol.file.allow", "never"),
+                ("trailer.x.key", "Signed-off-by")]
+        r = Repo()
+        try:
+            for key, value in risky + safe:
+                r.git("config", key, value)
+            found = "\n".join(guard.risky_git_config(str(r.path)))
+            for key, value in risky:
+                self.assertIn(f"{key.lower()}={value}", found.lower())
+            self.assertNotIn("github.com", found)
+            self.assertNotIn("=never", found)
+            self.assertNotIn("Signed-off-by", found)
+        finally:
+            r.close()
+
+
+class ChildGitTests(unittest.TestCase):
+    """Tools sekyu launches (semgrep, osv-scanner, npm) may run git themselves in the hostile repo."""
+
+    def setUp(self):
+        self.repo = hostile_repo()
+        self.saved = dict(os.environ)
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self.saved)
+        self.repo.close()
+
+    def test_child_git_never_runs_fsmonitor(self):
+        scan.find_tool("git")  # every external launch goes through find_tool
+        subprocess.run(["git", "ls-files"], cwd=self.repo.path, capture_output=True, env=os.environ.copy())
+        self.assertFalse((self.repo.path / "PROOF_fsmonitor").exists())
+
+    def test_existing_git_config_env_kept(self):
+        os.environ.update({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.name", "GIT_CONFIG_VALUE_0": "X"})
+        scan.find_tool("git")
+        scan.find_tool("git")  # idempotent: no duplicate entries
+        self.assertEqual(os.environ["GIT_CONFIG_COUNT"], "2")
+        self.assertEqual(os.environ["GIT_CONFIG_KEY_0"], "user.name")
+        self.assertEqual((os.environ["GIT_CONFIG_KEY_1"], os.environ["GIT_CONFIG_VALUE_1"]), ("core.fsmonitor", "false"))
+
+    def test_audit_skips_external_tools_in_hostile_repo(self):
+        with mock.patch.object(audit, "semgrep_findings") as sg, \
+                mock.patch.object(audit, "dependency_findings") as deps, \
+                mock.patch.object(audit.runtimes, "runtime_findings") as rt:
+            result = audit.audit(str(self.repo.path), external=True)
+        sg.assert_not_called()
+        deps.assert_not_called()
+        rt.assert_not_called()
+        self.assertTrue(any("skipped" in m for m in result["INFO"]), result["INFO"])
+        self.assertEqual(sorted(p.name for p in self.repo.path.glob("PROOF_*")), [])
 
 
 class AuditExternalTests(unittest.TestCase):

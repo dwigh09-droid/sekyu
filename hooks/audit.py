@@ -188,8 +188,9 @@ def audit(repo=".", external=None):
         result["INFO"].append(f"{os.path.abspath(repo)}: not a git repository (or git not installed); nothing audited")
         return result
 
-    for entry in guard.risky_git_config(repo, git=_git):
-        result["HIGH"].append(f".git/config {entry}: makes git run a program; a hostile repo uses this to run code. "
+    risky = guard.risky_git_config(repo, git=_git)
+    for entry in risky:
+        result["HIGH"].append(f"repo git config {entry}: makes git run a program; a hostile repo uses this to run code. "
                               "Review it before running git here")
     hooks = os.path.join(repo, _git(repo, "rev-parse", "--git-path", "hooks").strip())
     if os.path.isdir(hooks):
@@ -227,6 +228,9 @@ def audit(repo=".", external=None):
     for path in filter(None, _git(repo, "ls-files", "-ci", "--exclude-standard", "-z").split("\0")):
         result["MEDIUM"].append(f"{path}: tracked but matches .gitignore; 'git rm --cached' it if it should not be public")
 
+    if risky:  # other tools run their own git here; don't hand a hostile repo more chances to run code
+        result["INFO"].append("dependency, semgrep and language checks skipped: this repo's git config runs programs")
+        return result
     checks = [dependency_findings]
     if external:
         checks += [semgrep_findings, runtimes.runtime_findings]

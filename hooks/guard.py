@@ -107,9 +107,11 @@ def _git_runs(cmd, subcommand):
 # ls-files/diff, textconv on diff/log -p, clean filters on diff of the worktree). Zips and copied folders
 # carry .git/config; a normal clone does not.
 SAFE_GIT_ARGS = ("-c", "core.fsmonitor=false")
-RISKY_GIT_KEY = re.compile(r"^(core\.(fsmonitor|hookspath|sshcommand|pager|editor|askpass)|sequence\.editor"
-                           r"|gpg\.(\w+\.)?program|credential\.(\S+\.)?helper|diff\.\S+\.(textconv|command)"
-                           r"|merge\.\S+\.driver|filter\.\S+\.(clean|smudge|process)|uploadpack\.packobjectshook|alias\.\S+)$")
+RISKY_GIT_KEY = re.compile(r"^(core\.(fsmonitor|hookspath|sshcommand|pager|editor|askpass|gitproxy|alternaterefscommand)"
+                           r"|sequence\.editor|gpg\.(\w+\.)?program|gpg\.ssh\.defaultkeycommand|credential\.(\S+\.)?helper"
+                           r"|diff\.external|diff\.\S+\.(textconv|command)|merge\.\S+\.driver|filter\.\S+\.(clean|smudge|process)"
+                           r"|uploadpack\.packobjectshook|remote\.\S+\.(receivepack|uploadpack)|trailer\.\S+\.(cmd|command)"
+                           r"|hook\.\S+\.command|alias\.\S+|protocol\.(\S+\.)?allow|remote\.\S+\.(url|pushurl))$")
 SAFE_FSMONITOR = {"", "false", "true", "0", "1", "no", "yes", "off", "on"}
 
 
@@ -125,18 +127,30 @@ def _git(cwd, *args, timeout=3):
     return r.stdout
 
 
+def _is_risky(key, value):
+    k, v = key.lower(), value.strip()
+    if not RISKY_GIT_KEY.match(k):
+        return False
+    if k == "core.fsmonitor":
+        return v.lower() not in SAFE_FSMONITOR
+    if k.startswith("alias."):
+        return v.startswith("!")
+    if k.startswith("protocol."):
+        return v.lower() != "never"
+    if k.startswith("remote.") and k.endswith(("url", "pushurl")):
+        return v.lower().startswith(("ext::", "fd::"))  # transports that run a command
+    return True
+
+
 def risky_git_config(cwd, git=_git):
-    """'key=value' for each repo-local git setting that makes git run a program."""
+    """'key=value' for each repo-local git setting that makes git run a program. Reads both .git/config
+    and .git/config.worktree: `--local` alone misses the worktree file, where a repo can hide settings."""
     risky = []
-    for entry in filter(None, git(cwd, "config", "--list", "--local", "--includes", "-z").split("\0")):
+    tokens = git(cwd, "config", "--list", "--show-scope", "--includes", "-z").split("\0")
+    for scope, entry in zip(tokens[::2], tokens[1::2]):  # -z: scope NUL key LF value NUL
         key, _, value = entry.partition("\n")
-        k = key.lower()
-        if not RISKY_GIT_KEY.match(k):
-            continue
-        if (k == "core.fsmonitor" and value.strip().lower() in SAFE_FSMONITOR) or \
-                (k.startswith("alias.") and not value.startswith("!")):
-            continue
-        risky.append(f"{key}={value}")
+        if scope in ("local", "worktree") and _is_risky(key, value):
+            risky.append(f"{key}={value}")
     return risky
 
 

@@ -111,10 +111,27 @@ def diff_secret_findings(diff):
 FINDING_EXIT = {"semgrep": 1, "gitleaks": 3, "bandit": 1}
 
 
+def _harden_child_git():
+    """Tools we launch (semgrep, osv-scanner, npm) run git themselves inside the scanned repo, without our
+    `-c` flags. GIT_CONFIG_COUNT/KEY/VALUE apply to every git child, so force core.fsmonitor off for them."""
+    env = os.environ
+    try:
+        count = int(env.get("GIT_CONFIG_COUNT") or 0)
+    except ValueError:
+        count = 0
+    if any(env.get(f"GIT_CONFIG_KEY_{i}") == "core.fsmonitor" and env.get(f"GIT_CONFIG_VALUE_{i}") == "false"
+           for i in range(count)):
+        return
+    env[f"GIT_CONFIG_KEY_{count}"] = "core.fsmonitor"
+    env[f"GIT_CONFIG_VALUE_{count}"] = "false"
+    env["GIT_CONFIG_COUNT"] = str(count + 1)
+
+
 def find_tool(name):
     """Absolute path of an external tool, or None. Never a program inside the current folder: on Windows
     both which() and CreateProcess search it, so a repo could plant git.exe/semgrep.exe (CWE-427)."""
     os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"  # also stops CreateProcess searching cwd for children
+    _harden_child_git()
     found = shutil.which(name)
     if not found:
         return None

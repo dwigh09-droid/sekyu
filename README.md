@@ -42,7 +42,7 @@ On `git commit`, the added lines of the staged diff are scanned for secrets with
 
 | Severity | Finding |
 |---|---|
-| HIGH | Repo `.git/config` entries that make git run programs (`core.fsmonitor`, textconv, filters, `!` aliases, hooksPath; sign of a hostile repo); semgrep ERROR findings (RCE, injection); vulnerable dependencies with CVSS 7+; end-of-life language runtimes; secrets in tracked files; secrets in any commit on any branch (`git log -p --all`, added lines); tracked sensitive files (`.env*` except templates, `*.pem`, `*.key`, `id_rsa*`) |
+| HIGH | Repo git config entries (`.git/config` and `.git/config.worktree`) that make git run programs (`core.fsmonitor`, textconv, filters, `!` aliases, hooksPath, `ext::` remotes, `gpg.ssh.defaultKeyCommand`, and more; sign of a hostile repo; other checks are then skipped); semgrep ERROR findings (RCE, injection); vulnerable dependencies with CVSS 7+; end-of-life language runtimes; secrets in tracked files; secrets in any commit on any branch (`git log -p --all`, added lines); tracked sensitive files (`.env*` except templates, `*.pem`, `*.key`, `id_rsa*`) |
 | MEDIUM | Non-sample scripts in `.git/hooks`; semgrep WARNING findings; other vulnerable dependencies; runtimes missing security patches; risky code in tracked files; commit author/committer emails that are not GitHub noreply; tracked files that `.gitignore` now excludes |
 | INFO | Noreply commit emails; dependency checks that did not run |
 
