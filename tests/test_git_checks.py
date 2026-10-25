@@ -490,6 +490,74 @@ class HiddenConfigTests(unittest.TestCase):
             r.close()
 
 
+class RceRound3Tests(unittest.TestCase):
+    """Bugs found by /sekyu-rce on 0.4.1. Each fixture uses a harmless marker file."""
+
+    def test_audit_stops_after_risky_config(self):
+        r = Repo()
+        try:
+            r.commit("a.txt", "x\n")
+            r.git("config", "alias.pwn", "!sh -c id")  # any risky key
+            calls = []
+            real = audit._git
+
+            def spy(repo, *args):
+                calls.append(args[0])
+                return real(repo, *args)
+
+            with mock.patch.object(audit, "_git", side_effect=spy):
+                result = audit.audit(str(r.path), external=False)
+            self.assertIn("alias.pwn=!sh -c id", "\n".join(result["HIGH"]))
+            self.assertNotIn("log", calls)  # no git command that could start gpg/textconv after the warning
+            self.assertNotIn("ls-files", calls)
+        finally:
+            r.close()
+
+    def test_signature_checks_disabled(self):
+        self.assertIn("log.showSignature=false", " ".join(guard.SAFE_GIT_ARGS))
+
+    def test_guard_diff_ignores_nested_repos(self):
+        r = Repo()
+        try:
+            r.commit("a.txt", "x\n")
+            r.write("a.txt", "y\n")
+            calls = []
+            real = guard._git
+
+            def spy(cwd, *args, **kw):
+                calls.append(args)
+                return real(cwd, *args, **kw)
+
+            with mock.patch.object(guard, "_git", side_effect=spy):
+                guard.check_git("git commit -a -m x", str(r.path))
+            diff = [a for a in calls if a and a[0] == "diff"]
+            self.assertTrue(diff)
+            self.assertIn("--ignore-submodules=all", diff[0])
+        finally:
+            r.close()
+
+    def test_guard_blocks_planted_git_hook(self):
+        r = Repo()
+        try:
+            r.commit("a.txt", "x\n")
+            (r.path / ".git" / "hooks" / "pre-commit").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            for cmd in ("git commit -m x", "git push origin main"):
+                with self.subTest(cmd=cmd):
+                    reason = guard.check_git(cmd, str(r.path))
+                    self.assertIsNotNone(reason)
+                    self.assertIn("pre-commit", reason)
+        finally:
+            r.close()
+
+    def test_guard_allows_sample_hooks_only(self):
+        r = Repo()
+        try:
+            r.commit("a.txt", "x\n")
+            self.assertIsNone(guard.check_git("git commit -m x", str(r.path)))  # git init ships only *.sample
+        finally:
+            r.close()
+
+
 class ChildGitTests(unittest.TestCase):
     """Tools sekyu launches (semgrep, osv-scanner, npm) may run git themselves in the hostile repo."""
 

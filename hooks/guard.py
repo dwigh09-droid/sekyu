@@ -4,6 +4,7 @@ Checks split the command into segments and tokens instead of using one big regex
 so run time stays linear on hostile input (no ReDoS -> no hook timeout -> no fail-open).
 """
 import json
+import os
 import re
 import subprocess
 import sys
@@ -106,7 +107,7 @@ def _git_runs(cmd, subcommand):
 # A repo's own .git/config can make git run programs, even for read-only commands (core.fsmonitor on
 # ls-files/diff, textconv on diff/log -p, clean filters on diff of the worktree). Zips and copied folders
 # carry .git/config; a normal clone does not.
-SAFE_GIT_ARGS = ("-c", "core.fsmonitor=false")
+SAFE_GIT_ARGS = ("-c", "core.fsmonitor=false", "-c", "log.showSignature=false")  # no fsmonitor, no gpg.program
 RISKY_GIT_KEY = re.compile(r"^(core\.(fsmonitor|hookspath|sshcommand|pager|editor|askpass|gitproxy|alternaterefscommand)"
                            r"|sequence\.editor|gpg\.(\w+\.)?program|gpg\.ssh\.defaultkeycommand|credential\.(\S+\.)?helper"
                            r"|diff\.external|diff\.\S+\.(textconv|command)|merge\.\S+\.driver|filter\.\S+\.(clean|smudge|process)"
@@ -115,8 +116,8 @@ RISKY_GIT_KEY = re.compile(r"^(core\.(fsmonitor|hookspath|sshcommand|pager|edito
 SAFE_FSMONITOR = {"", "false", "true", "0", "1", "no", "yes", "off", "on"}
 
 
-def _git(cwd, *args, timeout=3):
-    # 3 s each, at most 3 calls: stays inside the 10 s hook timeout.
+def _git(cwd, *args, timeout=2):
+    # 2 s each, at most 4 calls: stays inside the 10 s hook timeout.
     git = scan.find_tool("git")  # never a git.exe planted in the repo
     if not git:
         raise RuntimeError("git not found")
@@ -140,6 +141,15 @@ def _is_risky(key, value):
     if k.startswith("remote.") and k.endswith(("url", "pushurl")):
         return v.lower().startswith(("ext::", "fd::"))  # transports that run a command
     return True
+
+
+def git_hooks(cwd, git=_git):
+    """Names of non-sample scripts in the repo's hooks folder (follows core.hooksPath). Git runs these itself."""
+    path = git(cwd, "rev-parse", "--git-path", "hooks").strip()
+    path = os.path.join(cwd or ".", path)
+    if not os.path.isdir(path):
+        return []
+    return sorted(n for n in os.listdir(path) if not n.endswith(".sample") and os.path.isfile(os.path.join(path, n)))
 
 
 def risky_git_config(cwd, git=_git):
@@ -166,6 +176,10 @@ def check_git(cmd, cwd=None):
     if not (committing or _git_runs(cmd, "push")):
         return None
     try:
+        hooks = git_hooks(cwd)
+        if hooks:
+            return ("this repo has git hooks that run automatically on commit/push (" + ", ".join(hooks[:5]) + "). "
+                    "A hostile repo uses these to run code. Ask the user to review .git/hooks first")
         risky = risky_git_config(cwd)
         if risky:
             return ("this repo's own .git/config makes git run programs (" + "; ".join(risky[:5]) + "). A hostile "
@@ -177,7 +191,8 @@ def check_git(cmd, cwd=None):
                     "'git config user.email <id>+<user>@users.noreply.github.com' first")
         if committing:
             target = ["HEAD"] if _commit_all(cmd) else ["--cached"]
-            findings = scan.diff_secret_findings(_git(cwd, "diff", *target, "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv"))
+            findings = scan.diff_secret_findings(_git(cwd, "diff", *target, "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv",
+                                                                "--ignore-submodules=all"))  # nested repos have their own config
             if findings:
                 return "secrets in the changes being committed; remove them first:\n" + "\n".join(findings[:20])
     except Exception:

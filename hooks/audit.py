@@ -192,11 +192,11 @@ def audit(repo=".", external=None):
     for entry in risky:
         result["HIGH"].append(f"repo git config {entry}: makes git run a program; a hostile repo uses this to run code. "
                               "Review it before running git here")
-    hooks = os.path.join(repo, _git(repo, "rev-parse", "--git-path", "hooks").strip())
-    if os.path.isdir(hooks):
-        for name in sorted(os.listdir(hooks)):
-            if not name.endswith(".sample"):
-                result["MEDIUM"].append(f".git/hooks/{name}: runs automatically on git operations; review it")
+    for name in guard.git_hooks(repo, git=_git):
+        result["MEDIUM"].append(f".git/hooks/{name}: runs automatically on git operations; review it")
+    if risky:  # every later git command or tool could trigger it (gpg.program on log, filters, fsmonitor)
+        result["INFO"].append("rest of the audit skipped: this repo's git config runs programs; review it first")
+        return result
 
     for path in filter(None, _git(repo, "ls-files", "-z").split("\0")):
         full = os.path.join(repo, path)
@@ -228,9 +228,6 @@ def audit(repo=".", external=None):
     for path in filter(None, _git(repo, "ls-files", "-ci", "--exclude-standard", "-z").split("\0")):
         result["MEDIUM"].append(f"{path}: tracked but matches .gitignore; 'git rm --cached' it if it should not be public")
 
-    if risky:  # other tools run their own git here; don't hand a hostile repo more chances to run code
-        result["INFO"].append("dependency, semgrep and language checks skipped: this repo's git config runs programs")
-        return result
     checks = [dependency_findings]
     if external:
         checks += [semgrep_findings, runtimes.runtime_findings]

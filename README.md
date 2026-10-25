@@ -21,7 +21,7 @@ Prompts are suggestions; hooks always run. sekyu puts deterministic checks in th
 |---|---|---|
 | `hooks/scan.py` | After `Edit`, `Write`, `MultiEdit` | Scans the changed file. Findings: exit code 2, report sent to Claude, Claude fixes. Clean: silent. |
 | `hooks/guard.py` | Before `Bash`, `PowerShell` | Blocks dangerous commands (pipe-to-shell, `rm -rf /`, force push, `chmod 777`, committing `.env`). Claude is told why. |
-| `hooks/guard.py` | Before `git commit`, `git push` | Blocks if the repo's own `.git/config` makes git run programs, or if `git config user.email` is not a `@users.noreply.github.com` address, so Claude asks you first. On commit, also blocks secrets in the staged diff (or all tracked changes for `commit -a`). |
+| `hooks/guard.py` | Before `git commit`, `git push` | Blocks if the repo has git hooks (`.git/hooks`, non-sample) or its own git config makes git run programs, or if `git config user.email` is not a `@users.noreply.github.com` address, so Claude asks you first. On commit, also blocks secrets in the staged diff (or all tracked changes for `commit -a`). |
 | `/sekyu-audit` | You run it | Read-only audit of the whole repo and its history, code vulnerabilities, dependencies, and language versions. See [Repo audit](#repo-audit). |
 | `/sekyu-rce` | You run it | Deep AI hunt for code execution bugs (RCE) that pattern scanners miss. See [RCE hunt](#rce-hunt). |
 | `skills/secure-coding` | Claude loads it when writing code that touches input, auth, SQL, files, or secrets | Short rule set: validate at trust boundaries, parameterized queries, encode output, no hardcoded secrets, least privilege. |
