@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -51,6 +52,33 @@ def run_scan(path, **tool_input):
         [sys.executable, str(ROOT / "hooks" / "scan.py")],
         input=payload, capture_output=True, text=True, env=env,
     )
+
+
+class ToolLookupTests(unittest.TestCase):
+    """External tools must never be launched from the folder being scanned (CWE-427 binary planting)."""
+
+    def test_rejects_tool_found_in_cwd(self):
+        for found in (os.path.join(os.getcwd(), "semgrep.exe"), ".\\semgrep.EXE", "semgrep"):
+            with self.subTest(found=found), mock.patch.object(scan.shutil, "which", return_value=found):
+                self.assertIsNone(scan.find_tool("semgrep"))
+
+    def test_accepts_tool_outside_cwd(self):
+        outside = os.path.join(tempfile.gettempdir(), "elsewhere", "semgrep.exe")
+        with mock.patch.object(scan.shutil, "which", return_value=outside):
+            self.assertEqual(scan.find_tool("semgrep"), outside)
+
+    @unittest.skipUnless(os.name == "nt", "Windows searches the current folder for executables")
+    def test_planted_exe_never_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("git.exe", "semgrep.exe"):
+                shutil.copy(r"C:\Windows\System32\whoami.exe", os.path.join(d, name))
+            env = {k: v for k, v in os.environ.items() if k.lower() != "nodefaultcurrentdirectoryinexepath"}
+            code = ("import sys; sys.path.insert(0, sys.argv[1]); import scan, guard; "
+                    "print(scan.find_tool('semgrep')); print(guard._git(None, '--version'))")
+            r = subprocess.run([sys.executable, "-c", code, str(ROOT / "hooks")], cwd=d, env=env,
+                               capture_output=True, text=True)
+            self.assertNotIn(d.lower(), r.stdout.lower())
+            self.assertIn("git version", r.stdout)
 
 
 class BuiltinTests(unittest.TestCase):
@@ -192,7 +220,7 @@ class ExternalTests(unittest.TestCase):
 
     def test_semgrep_finding(self):
         done = subprocess.CompletedProcess([], 1, stdout="app.py:3 rule.x", stderr="")
-        self.patch(lambda t: t if t == "semgrep" else None, mock.Mock(return_value=done))
+        self.patch(lambda t: "/usr/bin/" + t if t == "semgrep" else None, mock.Mock(return_value=done))
         findings = scan.external_findings("app.py")
         self.assertEqual(len(findings), 1)
         self.assertTrue(findings[0].startswith("[semgrep]"))
@@ -200,46 +228,46 @@ class ExternalTests(unittest.TestCase):
 
     def test_bandit_only_py(self):
         run = mock.Mock()
-        self.patch(lambda t: t if t == "bandit" else None, run)
+        self.patch(lambda t: "/usr/bin/" + t if t == "bandit" else None, run)
         self.assertEqual(scan.external_findings("app.js"), [])
         run.assert_not_called()
 
     def test_dash_path_not_a_flag(self):
         done = subprocess.CompletedProcess([], 0, stdout="", stderr="")
         run = mock.Mock(return_value=done)
-        self.patch(lambda t: t, run)
+        self.patch(lambda t: "/usr/bin/" + t, run)
         scan.external_findings("--config=evil.py")
         for call in run.call_args_list:
             self.assertFalse(any(a.startswith("--config=evil") for a in call.args[0]))
 
     def test_error_exit_not_a_finding(self):
         done = subprocess.CompletedProcess([], 2, stdout="error: could not fetch p/default", stderr="")
-        self.patch(lambda t: t, mock.Mock(return_value=done))
+        self.patch(lambda t: "/usr/bin/" + t, mock.Mock(return_value=done))
         self.assertEqual(scan.external_findings("app.py"), [])
 
     def test_gitleaks_finding(self):
         done = subprocess.CompletedProcess([], 3, stdout="leak in app.py:1", stderr="")
-        self.patch(lambda t: t if t == "gitleaks" else None, mock.Mock(return_value=done))
+        self.patch(lambda t: "/usr/bin/" + t if t == "gitleaks" else None, mock.Mock(return_value=done))
         self.assertEqual(len(scan.external_findings("app.py")), 1)
 
     def test_decodes_utf8(self):
         run = mock.Mock(return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
-        self.patch(lambda t: t if t == "semgrep" else None, run)
+        self.patch(lambda t: "/usr/bin/" + t if t == "semgrep" else None, run)
         scan.external_findings("app.py")
         self.assertEqual(run.call_args.kwargs.get("encoding"), "utf-8")
 
     def test_unexpected_error(self):
         err = UnicodeDecodeError("cp1252", b"\x9d", 0, 1, "bad")
-        self.patch(lambda t: t, mock.Mock(side_effect=err))
+        self.patch(lambda t: "/usr/bin/" + t, mock.Mock(side_effect=err))
         self.assertEqual(scan.external_findings("app.py"), [])
 
     def test_timeout(self):
-        self.patch(lambda t: t, mock.Mock(side_effect=subprocess.TimeoutExpired("x", 60)))
+        self.patch(lambda t: "/usr/bin/" + t, mock.Mock(side_effect=subprocess.TimeoutExpired("x", 60)))
         self.assertEqual(scan.external_findings("app.py"), [])
 
     def test_crash_no_output(self):
         done = subprocess.CompletedProcess([], 2, stdout="", stderr="")
-        self.patch(lambda t: t, mock.Mock(return_value=done))
+        self.patch(lambda t: "/usr/bin/" + t, mock.Mock(return_value=done))
         self.assertEqual(scan.external_findings("app.py"), [])
 
 

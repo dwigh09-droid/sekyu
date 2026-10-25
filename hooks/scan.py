@@ -111,6 +111,22 @@ def diff_secret_findings(diff):
 FINDING_EXIT = {"semgrep": 1, "gitleaks": 3, "bandit": 1}
 
 
+def find_tool(name):
+    """Absolute path of an external tool, or None. Never a program inside the current folder: on Windows
+    both which() and CreateProcess search it, so a repo could plant git.exe/semgrep.exe (CWE-427)."""
+    os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"  # also stops CreateProcess searching cwd for children
+    found = shutil.which(name)
+    if not found:
+        return None
+    path = os.path.abspath(found)
+    cwd = os.path.normcase(os.getcwd())
+    try:
+        inside = os.path.commonpath([os.path.normcase(path), cwd]) == cwd
+    except ValueError:  # different drives
+        inside = False
+    return None if inside else path
+
+
 def _run(name, cmd):
     """Run a scanner; return its report if it flagged something, else None."""
     try:
@@ -133,7 +149,7 @@ def external_findings(path):
         commands.append(["bandit", "-q", "-ll", path])
     findings = []
     for name, *args in commands:
-        exe = shutil.which(name)  # full path: Windows can't launch .cmd shims by bare name
+        exe = find_tool(name)  # full path, never from the scanned folder
         report = exe and _run(name, [exe, *args])
         if report:
             findings.append(f"[{name}] {report}")

@@ -2,7 +2,6 @@
 import json
 import re
 import os
-import shutil
 import subprocess
 import sys
 
@@ -15,7 +14,10 @@ KEY_EXTS = (".pem", ".key")
 
 
 def _git(repo, *args):
-    r = subprocess.run(["git", *args], cwd=repo, capture_output=True, encoding="utf-8", errors="replace")
+    git = scan.find_tool("git")  # never a git.exe planted in the audited repo
+    if not git:
+        raise RuntimeError("git not found")
+    r = subprocess.run([git, *args], cwd=repo, capture_output=True, encoding="utf-8", errors="replace")
     if r.returncode != 0:
         raise RuntimeError(r.stderr.strip())
     return r.stdout
@@ -33,7 +35,7 @@ NPM_HIGH = {"critical", "high"}
 
 def _tool_json(repo, name, args):
     """Run a dependency scanner; JSON output, or an INFO note when missing or broken. Never raises."""
-    exe = shutil.which(name)  # full path: Windows can't launch .cmd shims by bare name
+    exe = scan.find_tool(name)  # full path, never from the audited folder
     if not exe:
         return None, f"dependency check not run: install {name}"
     try:

@@ -105,7 +105,10 @@ def _git_runs(cmd, subcommand):
 
 def _git(cwd, *args):
     # 4 s each, at most 2 calls: stays inside the 10 s hook timeout.
-    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, encoding="utf-8", errors="replace", timeout=4)
+    git = scan.find_tool("git")  # never a git.exe planted in the repo
+    if not git:
+        raise RuntimeError("git not found")
+    r = subprocess.run([git, *args], cwd=cwd, capture_output=True, encoding="utf-8", errors="replace", timeout=4)
     if r.returncode != 0:
         raise RuntimeError(r.stderr)
     return r.stdout
