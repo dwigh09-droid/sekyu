@@ -135,13 +135,11 @@ def find_tool(name):
     found = shutil.which(name)
     if not found:
         return None
-    path = os.path.abspath(found)
-    cwd = os.path.normcase(os.getcwd())
-    try:
-        inside = os.path.commonpath([os.path.normcase(path), cwd]) == cwd
-    except ValueError:  # different drives
-        inside = False
-    return None if inside else path
+    path = os.path.abspath(os.path.join(os.getcwd(), found))
+    # Planting works through the current folder itself, so refuse a tool sitting directly in it. Not anything
+    # *under* it: with cwd at a drive root (C:\) every installed tool is under it.
+    in_cwd = os.path.normcase(os.path.dirname(path)) == os.path.normcase(os.path.abspath(os.getcwd()))
+    return None if in_cwd else path
 
 
 def _run(name, cmd):

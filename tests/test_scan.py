@@ -67,6 +67,16 @@ class ToolLookupTests(unittest.TestCase):
         with mock.patch.object(scan.shutil, "which", return_value=outside):
             self.assertEqual(scan.find_tool("semgrep"), outside)
 
+    def test_drive_root_cwd_still_finds_installed_tools(self):
+        root = os.path.abspath(os.sep)  # e.g. C:\ : every installed tool is "under" it
+        installed = os.path.join(root, "Python314", "python.exe")
+        planted = os.path.join(root, "semgrep.exe")
+        with mock.patch.object(scan.os, "getcwd", return_value=root):
+            with mock.patch.object(scan.shutil, "which", return_value=installed):
+                self.assertEqual(scan.find_tool("python"), installed)
+            with mock.patch.object(scan.shutil, "which", return_value=planted):
+                self.assertIsNone(scan.find_tool("semgrep"))
+
     @unittest.skipUnless(os.name == "nt", "Windows searches the current folder for executables")
     def test_planted_exe_never_runs(self):
         with tempfile.TemporaryDirectory() as d:
